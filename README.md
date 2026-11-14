@@ -31,6 +31,16 @@ Vespertine plays your stereo and surround music from one library: SACD images, D
   <img src="docs/screenshots/tour.gif" width="800" alt="Vespertine's bit-perfect signal path on a Fosi Audio ZD3, room correction measured in a real room, DSD over DoP, stereo and 5.1 versions listed once, 7.1 as head-tracked Spatial Audio on AirPods Max, and the Visualizer's turntable">
 </p>
 
+## In this fork
+
+This fork adds three things to Vespertine 1.1.4. Each one has its own switch in Settings, and all three are off when you install. With them off, the app works as upstream's does: a test checks that a library holding TIDAL rows, with TIDAL off, shows the same stats, albums, artists, genres and songs as a library without them.
+
+- **TIDAL** (Settings › Online › TIDAL integration). Sign in, search and browse, and play TIDAL tracks through Vespertine's own chain: signal path, EQ, room correction, analysis, gapless, Speaker Groups. Hi-res arrives from TIDAL as DASH segments, which Vespertine joins back into plain FLAC. Until a track has played, its format is what TIDAL lists, marked "≈"; after that it's the format the stream actually had. Favorites and playlists sync both ways. Audio stays on disk only when you download it. This uses TIDAL's unofficial API, ported from [python-tidal](https://github.com/tamland/python-tidal), and the repository holds no client ID, secret or token.
+- **Network players** (Settings › Playback › Network Players (UPnP, beta)). Plays the queue on UPnP AV and OpenHome renderers such as moOde. When nothing changes the samples, the renderer pulls the original file and the chip says so (`BIT-PERFECT · 24/192 SENT`). With EQ, room correction or volume on, Vespertine sends 24-bit FLAC at the source rate and names each step.
+- **AirPlay players** (Settings › Playback › AirPlay Players (beta)). Streams to AirPlay 1 receivers (shairport-sync, AirPort Express, most AirPlay speakers and AV receivers) as ALAC 16/44.1 that Vespertine encodes itself. It is never called bit-perfect, because the receiver follows the Mac's clock by adding or dropping frames, so the last step of the signal path reads "not verified".
+
+Each feature was designed before it was written; the specs and the decision log are in [docs/superpowers](docs/superpowers). They were built on separate branches, and they add 48 app tests and a TIDAL module with 176 tests of its own. The fork is rebased on [upstream](https://github.com/szeremeta1/Vespertine)'s latest code ([#320](https://github.com/szeremeta1/Vespertine/pull/320)). Where both sides changed the same lines, both changes were kept. Open problems are listed in [docs/superpowers/TODO-next.md](docs/superpowers/TODO-next.md). One example: no TIDAL track above 24/44.1 has yet been confirmed to play at its full rate.
+
 ## Highlights
 
 - **Speaker Groups (Beta): several DACs, one speaker system.** Play one stream across two or more DACs as a single quad or surround setup, with a channel map, a drawing of your room, and per-speaker level, delay and polarity. 5.1 and Dolby Atmos beds are placed on the speakers you actually have (tested with virtual devices only), and the signal path says exactly what that did to the samples. Off by default, and a beta: [read what is and isn't verified](#speaker-groups-beta).
@@ -167,7 +177,7 @@ PCM playback has been tested up to 768 kHz and DSD256 on a Fosi Audio ZD3, and u
 
 - Channel-for-channel output has been reported on one real device, a Sony TV over HDMI (5.1 and a 7.1 to 5.1 downmix, developer report without a capture; see [Tested devices](docs/DEVICES.md)). Multichannel USB DACs and Dolby/DTS bitstream to receivers are untested on real hardware; reports wanted.
 - Intel Macs are untested (the Intel build has run under Rosetta). DoP is reported to work up to DSD256 on the Fosi Audio ZD3 and up to DSD128 on the FiiO K11 (developer reports, no capture); DSD512 over DoP is untested on hardware.
-- No audio effect plugins, streaming services or UPnP/DLNA. Convolution is only part of room correction.
+- No audio effect plugins, and no streaming service other than TIDAL (this fork). Network playback covers UPnP AV, OpenHome and AirPlay 1 renderers only (this fork); there is no UPnP/DLNA server. Convolution is only part of room correction.
 - No DVD-Audio or DRM-protected Apple Music downloads. Dolby AC-4 and MPEG-H 3D Audio (Sony 360 Reality Audio) files are listed and named but not decoded, MQA plays as the plain FLAC it contains, and Auro-3D as ordinary surround PCM (no decoder for any of them; see [docs/FEATURES.md](docs/FEATURES.md)). TrueHD Atmos and DTS:X objects are not rendered, and TrueHD and DTS-HD MA receiver passthrough is unsupported on macOS.
 
 ## Building
