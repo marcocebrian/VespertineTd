@@ -31,6 +31,14 @@ Vespertine plays your stereo and surround music from one library: SACD images, D
   <img src="docs/screenshots/tour.gif" width="800" alt="Vespertine's bit-perfect signal path on a Fosi Audio ZD3, room correction measured in a real room, DSD over DoP, stereo and 5.1 versions listed once, 7.1 as head-tracked Spatial Audio on AirPods Max, and the Visualizer's turntable">
 </p>
 
+## In this fork
+
+This fork adds TIDAL to Vespertine. It has its own switch (Settings › Online › TIDAL integration) and is off when you install. With it off, the app works as upstream's does: a test checks that a library holding TIDAL rows, with TIDAL off, shows the same stats, albums, artists, genres and songs as a library without them.
+
+- **TIDAL**. Sign in, search and browse, and play TIDAL tracks through Vespertine's own chain: signal path, EQ, room correction, analysis, gapless, Speaker Groups, and upstream's network and AirPlay players. Hi-res arrives from TIDAL as DASH segments, which Vespertine joins back into plain FLAC. Until a track has played, its format is what TIDAL lists, marked "≈"; after that it's the format the stream actually had. Favorites and playlists sync both ways. Audio stays on disk only when you download it. This uses TIDAL's unofficial API, ported from [python-tidal](https://github.com/tamland/python-tidal), and the repository holds no client ID, secret or token.
+
+The network players (UPnP, OpenHome) and AirPlay players this fork started with are now upstream ([#329](https://github.com/szeremeta1/Vespertine/pull/329)), and this fork uses upstream's code for them. TIDAL is kept on top of [upstream](https://github.com/szeremeta1/Vespertine)'s latest code, and its library switch is one more rule in upstream's music-server visibility. The specs and the decision log are in [docs/superpowers](docs/superpowers); open problems are listed in [docs/superpowers/TODO-next.md](docs/superpowers/TODO-next.md). One example: no TIDAL track above 24/44.1 has yet been confirmed to play at its full rate, and TIDAL's strings are not translated yet.
+
 ## Highlights
 
 - **Speaker Groups (Beta): several DACs, one speaker system.** Play one stream across two or more DACs as a single quad or surround setup, with a channel map, a drawing of your room, and per-speaker level, delay and polarity. 5.1 and Dolby Atmos beds are placed on the speakers you actually have (tested with virtual devices only), and the signal path says exactly what that did to the samples. Off by default, and a beta: [read what is and isn't verified](#speaker-groups-beta).
@@ -169,7 +177,7 @@ PCM playback has been tested up to 768 kHz and DSD256 on a Fosi Audio ZD3, and u
 
 - Channel-for-channel output has been reported on one real device, a Sony TV over HDMI (5.1 and a 7.1 to 5.1 downmix, developer report without a capture; see [Tested devices](docs/DEVICES.md)). Multichannel USB DACs and Dolby/DTS bitstream to receivers are untested on real hardware; reports wanted.
 - Intel Macs are untested (the Intel build has run under Rosetta). DoP is reported to work up to DSD256 on the Fosi Audio ZD3 and up to DSD128 on the FiiO K11 (developer reports, no capture); DSD512 over DoP is untested on hardware.
-- No audio effect plugins and no client for any commercial streaming service. Convolution is only part of room correction. Network Players, Receive from Other Apps (UPnP) and Music Servers (OpenSubsonic) are beta and off by default.
+- No audio effect plugins, and no commercial streaming service other than TIDAL (this fork, off by default). Convolution is only part of room correction. Network Players, Receive from Other Apps (UPnP) and Music Servers (OpenSubsonic) are beta and off by default.
 - No DVD-Audio or DRM-protected Apple Music downloads. Dolby AC-4 and MPEG-H 3D Audio (Sony 360 Reality Audio) files are listed and named but not decoded, MQA plays as the plain FLAC it contains, and Auro-3D as ordinary surround PCM (no decoder for any of them; see [docs/FEATURES.md](docs/FEATURES.md)). TrueHD Atmos and DTS:X objects are not rendered, and TrueHD and DTS-HD MA receiver passthrough is unsupported on macOS.
 
 ## Building

@@ -185,6 +185,12 @@ enum DeveloperHooks {
                 }
             }
         }
+        // `-VespertineSettingsTab online|tidal|…` (with `-VespertineOpenSettings YES`): the tab Settings opens on.
+        if let tab = d.string(forKey: "VespertineSettingsTab") {
+            let tabs: [String: SettingsTab] = ["playback": .playback, "library": .library, "network": .network, "online": .online,
+                                               "tidal": .tidal, "remote": .remote, "updates": .updates, "about": .about]
+            if let chosen = tabs[tab] { model.settingsTab = chosen }
+        }
         if let path = d.string(forKey: "VespertineSnapshot") {
             Task { await snapshotLoop(to: path, delay: d.double(forKey: "VespertineSnapshotDelay"), repeats: max(1, d.integer(forKey: "VespertineSnapshotCount"))) }
         }
@@ -207,6 +213,10 @@ enum DeveloperHooks {
             case "albums": model.sidebar = .albums
             case "artists": model.sidebar = .artists
             case "songs": model.sidebar = .songs
+            case "tidal-search": model.sidebar = .tidalSearch
+            case "tidal-mixes": model.sidebar = .tidalMixes
+            case "tidal-new": model.sidebar = .tidalNewReleases
+            case "tidal-downloads": model.sidebar = .tidalDownloads
             case "genres": model.sidebar = .genres
             case "recent": model.sidebar = .recentlyAdded
             case "favorites": model.sidebar = .favorites

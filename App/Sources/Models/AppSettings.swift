@@ -204,6 +204,21 @@ final class AppSettings {
     /// AirPlay receivers whose volume Vespertine sets digitally (the song is converted). The others get their level as the
     /// receiver's own volume (RAOP metadata), and Vespertine's samples are left as they are.
     var airPlayDigitalVolume: Set<String> { didSet { defaults.set(airPlayDigitalVolume.sorted(), forKey: "airPlayDigitalVolume") } }
+    /// The TIDAL integration exists in the app only while this is on (Settings › Online › TIDAL integration), off by default. Off,
+    /// there is no TIDAL settings tab, sidebar section, Source column or inspector group, no TIDAL reader, sync or network traffic,
+    /// and the TIDAL rows in the library are left out of every list, count, album and smart playlist. Switching it off deletes nothing.
+    var tidalEnabled: Bool { didSet { defaults.set(tidalEnabled, forKey: "tidalEnabled") } }
+    /// TIDAL's `audioquality` for streams and downloads (Settings › TIDAL › Streaming quality): `HI_RES_LOSSLESS` (the default),
+    /// `LOSSLESS`, `HIGH` or `LOW`. TIDAL falls back to what the track or the subscription allows.
+    var tidalQuality: String { didSet { defaults.set(tidalQuality, forKey: "tidalQuality") } }
+    /// Where TIDAL downloads are written (`~/Music/Vespertine/TIDAL` by default).
+    var tidalDownloadsFolder: String { didSet { defaults.set(tidalDownloadsFolder, forKey: "tidalDownloadsFolder") } }
+    /// The downloads folder is a library folder (referenced in place), so downloaded files are scanned and linked to their TIDAL rows.
+    var tidalAddDownloadsToLibrary: Bool { didSet { defaults.set(tidalAddDownloadsToLibrary, forKey: "tidalAddDownloadsToLibrary") } }
+    /// When the TIDAL account was last pulled into the library (nil: never).
+    var tidalLastSync: Date? { didSet { defaults.set(tidalLastSync, forKey: "tidalLastSync") } }
+    /// The TIDAL account's name as TIDAL gave it at the last sign-in (shown in Settings › TIDAL).
+    var tidalAccountName: String? { didSet { defaults.set(tidalAccountName, forKey: "tidalAccountName") } }
     /// Song transitions (crossfade, Smart Mix, Live Set) and their master switch, off unless turned on. Reach the
     /// engine only while the switch is on (`engineSettings()`).
     var transitions: TransitionSettings { didSet { if transitions != oldValue { transitions.save(to: defaults) } } }
@@ -251,6 +266,7 @@ final class AppSettings {
             "autoAnalyze": false, "analyzeNetworkShares": false, "systemOutputFollowsPlayback": true, "relayVolumeKeys": false,
             "deviceOnQuit": "restore", "visualizerEnabled": false, "transitionsFeature": false, "speakerGroupsFeature": false, "upnpRenderersFeature": false, "airPlayPlayersFeature": false,
             "upnpReceiverFeature": false, "upnpReceiverVolume": false, "upnpReceiverOwnNetworks": true, "bundleCopies": false,
+            "tidalEnabled": false, "tidalQuality": "HI_RES_LOSSLESS", "tidalAddDownloadsToLibrary": true,
         ])
         // Every streaming provider's switch, and its play reports, start off.
         StreamingCore.registerDefaults(defaults, providers: StreamingModel.ids)
@@ -342,6 +358,14 @@ final class AppSettings {
         upnpReceiverVolume = defaults.bool(forKey: "upnpReceiverVolume")
         upnpReceiverOwnNetworks = defaults.bool(forKey: "upnpReceiverOwnNetworks")
         airPlayDigitalVolume = Set(defaults.stringArray(forKey: "airPlayDigitalVolume") ?? [])
+        tidalEnabled = defaults.bool(forKey: "tidalEnabled")
+        tidalQuality = defaults.string(forKey: "tidalQuality") ?? "HI_RES_LOSSLESS"
+        tidalDownloadsFolder = isolatedRun
+            ? resolvedDataDirectory.appendingPathComponent("TIDAL", isDirectory: true).path
+            : defaults.string(forKey: "tidalDownloadsFolder") ?? music.appendingPathComponent("Vespertine/TIDAL", isDirectory: true).path
+        tidalAddDownloadsToLibrary = defaults.bool(forKey: "tidalAddDownloadsToLibrary")
+        tidalLastSync = defaults.object(forKey: "tidalLastSync") as? Date
+        tidalAccountName = defaults.string(forKey: "tidalAccountName")
         transitions = TransitionSettings.load(from: defaults)
         self.dataDirectory = resolvedDataDirectory
         // A library that came from the old preferences gets its own file now (`didSet` doesn't run inside `init`).

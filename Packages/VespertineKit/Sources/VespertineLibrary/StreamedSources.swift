@@ -245,14 +245,17 @@ extension LibraryDatabase {
         set { filesHidden.withLock { $0 = !newValue } }
     }
 
-    /// The sources to leave out of the queries now: none when nothing is hidden.
+    /// The sources to leave out of the queries now: none when nothing is hidden. The TIDAL account (`includeTidal`) is left out
+    /// while TIDAL is off, and is no file source: hiding the files leaves it shown.
     func hiddenSourceIDs(_ db: Database) throws -> Set<Int64> {
-        let shown = shownProviders, files = showsFiles
-        guard shown != nil || !files else { return [] }
+        let shown = shownProviders, files = showsFiles, tidal = includeTidal
+        guard shown != nil || !files || !tidal else { return [] }
         var hidden = Set<Int64>()
         for row in try Row.fetchAll(db, sql: "SELECT id, path FROM source") {
             let path: String = row["path"]
-            if !path.hasPrefix(StreamLocation.prefix) {
+            if path == LibrarySource.tidalPath {
+                if !tidal { hidden.insert(row["id"]) }
+            } else if !path.hasPrefix(StreamLocation.prefix) {
                 if !files { hidden.insert(row["id"]) }
             } else if let shown {
                 if let account = StreamLocation.account(of: path), shown.contains(account.provider) { continue }
@@ -268,7 +271,8 @@ extension LibraryDatabase {
     public func visibleTracksClause(_ db: Database, qualifier: String = "track") throws -> String {
         let hidden = try hiddenSourceIDs(db)
         guard showsFiles else {
-            let shown = try Int64.fetchAll(db, sql: "SELECT id FROM source WHERE path LIKE '\(StreamLocation.prefix)%' ORDER BY id")
+            let shown = try Int64.fetchAll(db, sql: "SELECT id FROM source WHERE path LIKE '\(StreamLocation.prefix)%' OR path = ? ORDER BY id",
+                                           arguments: [LibrarySource.tidalPath])
                 .filter { !hidden.contains($0) }
             return shown.isEmpty ? "0" : "\(qualifier).sourceId IN (\(shown.map(String.init).joined(separator: ", ")))"
         }
@@ -280,11 +284,14 @@ extension LibraryDatabase {
         }
     }
 
-    /// A condition on `playlist` rows: a playlist that stands for one of a server's shows only while its provider is on.
+    /// A condition on `playlist` rows: a playlist that stands for one of a server's shows only while its provider is on, and one
+    /// that stands for one of TIDAL's only while TIDAL is on.
     func visiblePlaylistsClause(_ db: Database) throws -> String {
+        let tidal = try tidalPlaylistsClause(db)
         let hidden = try hiddenSourceIDs(db).sorted()
-        guard !hidden.isEmpty, try db.tableExists("streamedPlaylist") else { return "1" }
-        return "id NOT IN (SELECT playlistId FROM streamedPlaylist WHERE sourceId IN (\(hidden.map(String.init).joined(separator: ", "))))"
+        guard !hidden.isEmpty, try db.tableExists("streamedPlaylist") else { return tidal }
+        let servers = "id NOT IN (SELECT playlistId FROM streamedPlaylist WHERE sourceId IN (\(hidden.map(String.init).joined(separator: ", "))))"
+        return tidal == "1" ? servers : "\(servers) AND \(tidal)"
     }
 
     /// `albums` with the format of each album marked the same way ("≈") where that format rests on what a server lists. An album

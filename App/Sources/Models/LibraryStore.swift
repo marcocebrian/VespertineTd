@@ -7,6 +7,7 @@ import Foundation
 import GRDB
 import VespertineAudio
 import VespertineLibrary
+import VespertineTidal
 import Observation
 
 @Observable
@@ -42,12 +43,26 @@ final class LibraryStore {
     /// Albums with at least one favorite song (present), for the Favorites filter on album pages.
     private(set) var favoriteAlbumKeys: Set<String> = []
     /// The folders, drives and shares. None while the local library is off (`filesOn`): nothing lists, scans or watches them.
+    /// Never the TIDAL account: it is no folder or share, and the code that scans, watches, mounts or lists sources must not meet
+    /// it (`tidalSource`).
     private(set) var sources: [LibrarySource] = []
     /// Whether the music in folders, on drives and on shares is part of the app (Settings › Library › Local Library).
     private(set) var filesOn = true
     /// The accounts on music servers whose provider is switched on (none while it is off). They are not among `sources`:
     /// an account is not a folder, and nothing scans it.
     private(set) var streamedAccounts: [LibrarySource] = []
+    /// The TIDAL account's source, while TIDAL is switched on and the library has one.
+    private(set) var tidalSource: LibrarySource?
+    /// Whether the TIDAL account's songs are in every list, count and album (Settings › Online › TIDAL integration; off by default,
+    /// and then the library reads exactly as one that never had a TIDAL account).
+    private(set) var includesTidal = false
+    /// What the library keeps of each TIDAL song (by track ID) beyond its row: the quality TIDAL lists, whether it streams here, and its
+    /// download. Empty while TIDAL is off.
+    private(set) var tidalRecords: [Int64: TidalTrackRecord] = [:] { didSet { tidalRecordsVersion += 1 } }
+    /// Counts the changes of `tidalRecords` (cheap to compare, unlike the records).
+    private(set) var tidalRecordsVersion = 0
+    /// Albums whose songs are all streamed (none downloaded): they can't play without TIDAL. Empty while TIDAL is off.
+    private(set) var streamOnlyAlbumKeys: Set<String> = []
 
     // MARK: Copies
 
@@ -218,14 +233,17 @@ final class LibraryStore {
 
     /// `shownProviders`: the streaming providers whose switch is on, set before anything is read so that the first frame
     /// already leaves out the accounts of those that are off. Nil (tests, tools) leaves nothing out. `showsFiles`: the Local
-    /// Library switch, set as early for the same reason.
+    /// Library switch, set as early for the same reason. `includeTidal`: the TIDAL integration switch, the same way.
     init(dataDirectory: URL, automaticScanning: @escaping () -> Bool = { false }, shownProviders: Set<String>? = nil,
-         showsFiles: Bool = true) throws {
+         showsFiles: Bool = true, includeTidal: Bool = false) throws {
         self.automaticScanning = automaticScanning
         database = try LibraryDatabase(url: dataDirectory.appendingPathComponent("Library.sqlite"))
         database.shownProviders = shownProviders
         database.showsFiles = showsFiles
         filesOn = showsFiles
+        // Before anything reads: the TIDAL rows are hidden unless the switch is on.
+        database.includeTidal = includeTidal
+        includesTidal = includeTidal
         artwork = ArtworkStore(directory: dataDirectory.appendingPathComponent("Artwork", isDirectory: true))
         scanner = LibraryScanner(database: database, artwork: artwork)
         tagWriter = TagWriter(database: database, scanner: scanner,
@@ -274,14 +292,25 @@ final class LibraryStore {
         let database = database
         guard let state = try? database.writer.read({ db in
             (try LibraryDatabase.sources(db), try database.playlists(db), try database.stats(db), try database.streamedSources(db),
-             try database.stats(db, filesOnly: true))
+             try database.stats(db, filesOnly: true), try LibraryDatabase.tidalAccount(db))
         }) else { return }
         if let files = state.4 { fileStats = files }
         sources = filesOn ? state.0 : []
+        tidalSource = includesTidal ? state.5 : nil
         playlists = state.1
         if let stats = state.2 { self.stats = stats }
         streamedAccounts = state.3
         loadPlaylistTransitions()
+    }
+
+    /// Settings › Online › TIDAL integration was switched. Every list, count, album and playlist is read again as the library
+    /// is with that account in it, or as it is without. Nothing is deleted either way.
+    func setIncludeTidal(_ on: Bool) {
+        guard on != includesTidal else { return }
+        includesTidal = on
+        database.includeTidal = on
+        if !on { tidalRecords = [:]; streamOnlyAlbumKeys = [] }
+        visibilityChanged()
     }
 
     /// A streaming provider's switch changed, so its accounts' songs joined or left what the library shows. The database
@@ -325,6 +354,25 @@ final class LibraryStore {
         observeAlbums()
         let writer = database.writer
         let database = database
+        if includesTidal {
+            tasks.append(Task { [weak self] in
+                let obs = ValueObservation.tracking { db in
+                    (try TidalTrackRecord.fetchAll(db),
+                     Set(try String.fetchAll(db, sql: """
+                        SELECT DISTINCT albumKey FROM track WHERE sourceId IN (SELECT id FROM source WHERE path = ?)
+                        EXCEPT SELECT albumKey FROM track WHERE sourceId IS NULL OR sourceId NOT IN (SELECT id FROM source WHERE path = ?) OR filePath != ''
+                        """, arguments: [LibrarySource.tidalPath, LibrarySource.tidalPath])))
+                }
+                do {
+                    for try await (records, streamOnly) in obs.values(in: writer) {
+                        guard !Task.isCancelled, let self, self.includesTidal else { continue }
+                        let byTrack = Dictionary(records.map { ($0.trackId, $0) }, uniquingKeysWith: { a, _ in a })
+                        if self.tidalRecords != byTrack { self.tidalRecords = byTrack }
+                        if self.streamOnlyAlbumKeys != streamOnly { self.streamOnlyAlbumKeys = streamOnly }
+                    }
+                } catch {}
+            })
+        }
         tasks.append(Task { [weak self] in
             let obs = ValueObservation.tracking { db in try database.artists(db) }
             // The count covers the whole track table, so every track write (an analysis saved, a play counted) wakes
@@ -402,6 +450,17 @@ final class LibraryStore {
         tasks.append(Task { [weak self] in
             let obs = ValueObservation.tracking { db in try database.streamedSources(db) }
             do { for try await value in obs.values(in: writer) { if Task.isCancelled { break }; if self?.streamedAccounts != value { self?.streamedAccounts = value } } } catch {}
+        })
+        tasks.append(Task { [weak self] in
+            let obs = ValueObservation.tracking { db in try LibraryDatabase.tidalAccount(db) }
+            do {
+                for try await value in obs.values(in: writer) {
+                    if Task.isCancelled { break }
+                    guard let self else { break }
+                    let shown = self.includesTidal ? value : nil
+                    if self.tidalSource != shown { self.tidalSource = shown }
+                }
+            } catch {}
         })
     }
 
@@ -731,17 +790,44 @@ final class LibraryStore {
 
     func append(_ trackIDs: [Int64], to playlist: Playlist) {
         guard let id = playlist.id, !playlist.isSmart else { return }
+        // A TIDAL playlist takes TIDAL songs only; the router adds them (finding local songs' TIDAL versions) and tells TIDAL.
+        if let router = tidalRouter, router.isTidalPlaylist(id) {
+            router.append(trackIDs, to: id)
+            return
+        }
         try? database.append(trackIDs: trackIDs, to: id)
         revision += 1
     }
 
     func setPlaylistOrder(_ trackIDs: [Int64], playlist: Playlist) {
         guard let id = playlist.id else { return }
+        let router = tidalRouter.flatMap { $0.isTidalPlaylist(id) ? $0 : nil }
+        let before = router == nil ? [] : tidalIds(inPlaylist: id)
         try? database.setPlaylistTracks(trackIDs, playlistID: id)
         revision += 1
+        router?.reordered(id, from: before, to: tidalIds(inPlaylist: id))
     }
 
-    func deletePlaylist(_ playlist: Playlist) { if let id = playlist.id { try? database.deletePlaylist(id) } }
+    /// Lists that show playlists read them again.
+    func bumpRevision() { revision += 1 }
+
+    /// A playlist's TIDAL songs, in order, by TIDAL id.
+    func tidalIds(inPlaylist id: Int64) -> [Int] {
+        guard let playlist = playlists.first(where: { $0.id == id }) else { return [] }
+        return ((try? database.tracks(in: playlist)) ?? []).compactMap { $0.isTidalTrack ? URL(string: $0.location).flatMap(TidalPlayback.trackId(from:)) : nil }
+    }
+
+    func deletePlaylist(_ playlist: Playlist) {
+        guard let id = playlist.id else { return }
+        let uuid = tidalRouter != nil ? (try? database.tidalPlaylistUUID(playlistId: id)) ?? nil : nil
+        try? database.deletePlaylist(id)
+        if let uuid { tidalRouter?.deleted(uuid: uuid) }
+    }
+
+    /// Routes edits of TIDAL playlists to TIDAL (set by the app while TIDAL is on; nil otherwise, and everything stays local).
+    @ObservationIgnored weak var tidalRouter: TidalPlaylistRouter?
+    /// Told when hearts change on TIDAL songs (TIDAL ids), while TIDAL is on.
+    @ObservationIgnored var tidalFavoritesChanged: (([Int], Bool) -> Void)?
     /// A playlist's own transitions; nil follows the app's setting.
     func setTransitions(_ choice: TransitionOverride?, for playlist: Playlist) {
         guard let id = playlist.id else { return }
@@ -762,6 +848,7 @@ final class LibraryStore {
     func renamePlaylist(_ playlist: Playlist, to name: String) {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let id = playlist.id else { return }
         try? database.renamePlaylist(id, to: name)
+        if let router = tidalRouter, router.isTidalPlaylist(id) { router.renamed(id, to: name) }
     }
     func updateRules(_ playlist: Playlist, _ rules: SmartRules) {
         if let id = playlist.id { try? database.updateSmartRules(id, rules); revision += 1 }
@@ -843,6 +930,11 @@ final class LibraryStore {
     /// Library state only: favorites are never written into the files.
     func setFavorite(_ favorite: Bool, trackIDs: [Int64]) {
         do { try database.setFavorite(favorite, trackIDs: trackIDs) } catch { lastError = error.localizedDescription }
+        // For a TIDAL song the heart is the TIDAL favorite: shown at once, sent to TIDAL by the sync queue.
+        guard includesTidal, let tell = tidalFavoritesChanged else { return }
+        let songs = trackIDs.map { id in (id, (try? database.tidalRecord(trackId: id))??.tidalId) }
+        let tidal = TidalRouting.favoriteTargets(songs, tidalOn: includesTidal)
+        if !tidal.isEmpty { tell(tidal, favorite) }
     }
 
     /// A streamed song was read: what was read replaces what its server lists. Lists reload only when something changed.

@@ -44,7 +44,8 @@ struct MainWindow: View {
         }
         .background(Palette.window)
         .tint(Palette.brass)
-        .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search albums, artists and songs")
+        .searchable(text: $model.searchText, placement: .toolbar,
+                    prompt: model.sidebar == .tidalSearch ? Text("Search TIDAL") : Text("Search albums, artists and songs"))
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button { _ = model.path.popLast() } label: { Label("Back", systemImage: "chevron.backward") }
@@ -156,11 +157,12 @@ struct ContentRouter: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let searching = !model.searchText.trimmingCharacters(in: .whitespaces).isEmpty
+        // On TIDAL › Search the search field searches TIDAL: that page shows the results, not the library's.
+        let searching = !model.searchText.trimmingCharacters(in: .whitespaces).isEmpty && model.sidebar != .tidalSearch
         let path = model.path
         Group {
             if model.library.stats.tracks == 0 && model.library.scanProgress == nil && model.library.sources.isEmpty
-                && model.library.streamedAccounts.isEmpty && !searching {
+                && model.library.streamedAccounts.isEmpty && !searching && !model.sidebar.isTidal {
                 EmptyLibraryView()
             } else {
                 ZStack {
@@ -174,6 +176,7 @@ struct ContentRouter: View {
                 }
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) { TidalOfflineBanner() }
         .background(Palette.window)
     }
 
@@ -187,6 +190,10 @@ struct ContentRouter: View {
         case .favorites: FavoritesView()
         case .playlist(let id): PlaylistView(playlistID: id)
         case .source(let id): SourceView(sourceID: id)
+        case .tidalSearch: TidalSearchView(query: model.searchText)
+        case .tidalMixes: TidalMixesView()
+        case .tidalNewReleases: TidalNewReleasesView()
+        case .tidalDownloads: TidalDownloadsView()
         }
     }
 
@@ -219,9 +226,13 @@ struct ErrorBanner: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
     var body: some View {
-        if let message = model.player.lastError ?? model.library.lastError {
+        if let message = model.player.lastError ?? model.library.lastError ?? model.tidal.notice {
             HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(Palette.copper)
+                if model.player.lastError == nil, model.library.lastError == nil {
+                    TidalGlyph().foregroundStyle(Palette.text2)   // a TIDAL note, not an error
+                } else {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(Palette.copper)
+                }
                 Text(message).font(Typeface.ui(12)).foregroundStyle(Palette.text).lineLimit(2)
                 Button("Dismiss") { dismiss() }.buttonStyle(QuietButtonStyle(compact: true))
             }
@@ -242,7 +253,7 @@ struct ErrorBanner: View {
     }
 
     private func dismiss() {
-        withAnimation { model.player.clearError(); model.library.clearError() }
+        withAnimation { model.player.clearError(); model.library.clearError(); model.tidal.notice = nil }
     }
 }
 

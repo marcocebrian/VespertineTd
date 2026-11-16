@@ -13,6 +13,8 @@ public final class LibraryDatabase: Sendable {
     let providersShown = Locked<Set<String>?>(nil)
     /// Whether the songs of folders, drives and network shares are left out of the queries below (see `showsFiles`).
     let filesHidden = Locked(false)
+    /// Whether TIDAL's rows are part of what the queries below return (see `includeTidal`).
+    let includesTidal = Locked<Bool>(true)
 
     /// Opens (or creates) the library at `url`.
     public convenience init(url: URL) throws {
@@ -410,6 +412,58 @@ public final class LibraryDatabase: Sendable {
                 t.column("remoteId", .text).notNull()
             }
         }
+        m.registerMigration("v23-tidal") { db in
+            // What the library keeps of a TIDAL track beyond its `track` row (location "tidal://track/<id>", filePath the download or
+            // empty): its TIDAL identity, the quality TIDAL lists, whether it can be streamed, and the downloaded copy.
+            try db.create(table: "tidalTrack") { t in
+                t.primaryKey("trackId", .integer).references("track", onDelete: .cascade)
+                t.column("tidalId", .integer).notNull().unique()
+                t.column("albumId", .integer)
+                t.column("artistIds", .jsonText).notNull().defaults(to: "[]")
+                t.column("listedQuality", .text)
+                t.column("mediaTags", .jsonText).notNull().defaults(to: "[]")
+                t.column("explicit", .boolean).notNull().defaults(to: false)
+                t.column("copyright", .text)
+                t.column("popularity", .integer)
+                t.column("streamable", .boolean).notNull().defaults(to: true)
+                t.column("unavailableReason", .text)
+                t.column("downloadPath", .text)
+                t.column("formatIsProbed", .boolean).notNull().defaults(to: false)
+                t.column("lastSyncedAt", .datetime)
+            }
+            try db.create(index: "tidalTrack_downloadPath", on: "tidalTrack", columns: ["downloadPath"])
+        }
+        m.registerMigration("v24-tidal-playlists") { db in
+            // Which library playlist stands for which TIDAL playlist, and the `lastUpdated` its items were last fetched at.
+            try db.create(table: "tidalPlaylist") { t in
+                t.primaryKey("uuid", .text)
+                t.column("playlistId", .integer).notNull().unique().references("playlist", onDelete: .cascade)
+                t.column("lastUpdated", .text)
+            }
+        }
+        m.registerMigration("v25-tidal-favorites") { db in
+            // What each TIDAL list held at the last sync that was acted on (favorite tracks, favorite albums), so a list that
+            // comes back much shorter can be told from the library's own record of it.
+            try db.create(table: "tidalFavorite") { t in
+                t.column("list", .text).notNull()
+                t.column("itemId", .integer).notNull()
+                t.primaryKey(["list", "itemId"])
+            }
+        }
+        m.registerMigration("v26-tidal-origin") { db in
+            // How each TIDAL row arrived: the account's sync ("favorite") or Add to Library from the catalog ("added", never removed by sync).
+            try db.alter(table: "tidalTrack") { t in t.add(column: "origin", .text).notNull().defaults(to: "favorite") }
+        }
+        m.registerMigration("v27-tidal-pending-ops") { db in
+            // TIDAL writes made in Vespertine and not sent yet (offline, signed out, backing off), in the order they were made.
+            try db.create(table: "tidalPendingOp") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("kind", .text).notNull()
+                t.column("payload", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+            }
+        }
         return m
     }
 }
@@ -690,7 +744,8 @@ Self.albumOrder(try Track.fetchAll(db, sql: "SELECT * FROM track WHERE filePath 
         try writer.read { db in try playlists(db) }
     }
 
-    /// The playlists as one read of `db` sees them: a music server's own only while its provider is on.
+    /// The playlists as one read of `db` sees them: a music server's own only while its provider is on, TIDAL's (`tidalPlaylist`)
+    /// only while TIDAL is on.
     func playlists(_ db: Database) throws -> [Playlist] {
         try Playlist.filter(sql: try visiblePlaylistsClause(db)).order(Column("sortIndex"), Column("name")).fetchAll(db)
     }
@@ -951,9 +1006,9 @@ Self.albumOrder(try Track.fetchAll(db, sql: "SELECT * FROM track WHERE filePath 
         try writer.read { db in try Self.sources(db) }
     }
 
-    /// The folders, drives and shares as one read of `db` sees them.
+    /// The folders, drives and shares as one read of `db` sees them. Neither a music server's account nor TIDAL's is one of them.
     static func sources(_ db: Database) throws -> [LibrarySource] {
-        try LibrarySource.filter(sql: "path NOT LIKE '\(StreamLocation.prefix)%'").order(Column("path")).fetchAll(db)
+        try LibrarySource.filter(sql: "path NOT LIKE '\(StreamLocation.prefix)%' AND path != '\(LibrarySource.tidalPath)'").order(Column("path")).fetchAll(db)
     }
 
     /// Adds a folder (or a single file) to the library, or returns the source that already covers it. A local folder
@@ -966,8 +1021,8 @@ Self.albumOrder(try Track.fetchAll(db, sql: "SELECT * FROM track WHERE filePath 
             let canonical = source.url.resolvingSymlinksInPath().path
             let sources = try LibrarySource.fetchAll(db)
             var inside: [LibrarySource] = []
-            // A music server's account is no folder: nothing is inside it and it is inside nothing.
-            for existing in sources where !existing.isStreamed {
+            // A music server's account, or TIDAL's, is no folder: nothing is inside it and it is inside nothing.
+            for existing in sources where !existing.isStreamed && !existing.isTidal {
                 let path = existing.url.resolvingSymlinksInPath().path
                 if canonical == path || canonical.hasPrefix(path == "/" ? "/" : path + "/") { return existing }
                 if path.hasPrefix(canonical == "/" ? "/" : canonical + "/") {
@@ -1085,7 +1140,9 @@ Self.albumOrder(try Track.fetchAll(db, sql: "SELECT * FROM track WHERE filePath 
     public func saveAnalysis(_ analysis: FileAnalysis, filePath: String) throws {
         let data = try Self.analysisEncoder().encode(analysis)
         try writer.write { db in
-            for track in try Track.filter(Column("filePath") == filePath).fetchAll(db) {
+            // A streamed TIDAL song has no file: its analysis (of the stream's staged copy) is saved under its location.
+            let tracks = try Track.filter(Column("filePath") == filePath || (Column("filePath") == "" && Column("location") == filePath)).fetchAll(db)
+            for track in tracks {
                 guard let id = track.id else { continue }
                 try db.execute(sql: """
                     INSERT OR REPLACE INTO analysis (trackId, fileSize, modifiedAt, version, analyzedAt, data)
@@ -1248,7 +1305,7 @@ Self.albumOrder(try Track.fetchAll(db, sql: "SELECT * FROM track WHERE filePath 
         try writer.read { db in
             let rows = try Track.fetchAll(db, sql: """
                 SELECT t.* FROM track t LEFT JOIN analysis a ON a.trackId = t.id LEFT JOIN transitionProfile p ON p.trackId = t.id
-                WHERE t.isMissing = 0 AND t.isLossless = 1 AND t.isDSD = 0 AND t.filePath != ''
+                WHERE t.isMissing = 0 AND t.isLossless = 1 AND t.isDSD = 0 AND t.filePath != '' AND \(tidalShownClause(qualifier: "t"))
                   AND (a.trackId IS NULL OR a.version < ? OR a.fileSize != t.fileSize OR a.modifiedAt != t.modifiedAt
                        OR (t.cueStartFrame IS NULL AND t.location = t.filePath
                            AND (p.trackId IS NULL OR p.version < ? OR p.fileSize != t.fileSize OR p.modifiedAt != t.modifiedAt)))
@@ -1297,7 +1354,7 @@ Self.albumOrder(try Track.fetchAll(db, sql: "SELECT * FROM track WHERE filePath 
         if filesOnly { visible += " AND (sourceId IS NULL OR sourceId NOT IN (SELECT id FROM source WHERE path LIKE '\(StreamLocation.prefix)%'))" }
         return try Row.fetchOne(db, sql: """
             SELECT count(DISTINCT albumKey) AS a, count(*) AS t, count(DISTINCT lower(coalesce(albumArtist, artist))) AS ar,
-                   coalesce((SELECT sum(size) FROM (SELECT max(fileSize) AS size FROM track WHERE isMissing = 0 AND filePath != '' GROUP BY filePath)), 0) AS b, coalesce(sum(duration), 0) AS d FROM track WHERE isMissing = 0 AND \(visible)
+                   coalesce((SELECT sum(size) FROM (SELECT max(fileSize) AS size FROM track WHERE isMissing = 0 AND filePath != '' AND \(tidalShownClause()) GROUP BY filePath)), 0) AS b, coalesce(sum(duration), 0) AS d FROM track WHERE isMissing = 0 AND \(visible)
             """).map { Stats(albums: $0["a"], tracks: $0["t"], artists: $0["ar"], bytes: $0["b"], duration: $0["d"]) }
     }
 }

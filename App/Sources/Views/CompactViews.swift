@@ -167,7 +167,7 @@ struct DarkWindowAppearance: NSViewRepresentable {
 
 /// The Settings window's tabs; `AppModel.settingsTab` is the one showing (the setup assistant opens Settings on one).
 enum SettingsTab: Hashable {
-    case playback, library, network, online, remote, updates, about
+    case playback, library, network, online, tidal, remote, updates, about
 }
 
 struct SettingsView: View {
@@ -180,6 +180,9 @@ struct SettingsView: View {
             LibrarySettings().tabItem { Label("Library", systemImage: "books.vertical") }.tag(SettingsTab.library)
             NetworkSettings().tabItem { Label("Network", systemImage: "server.rack") }.tag(SettingsTab.network)
             OnlineSettings().tabItem { Label("Online", systemImage: "globe") }.tag(SettingsTab.online)
+            if model.settings.tidalEnabled {
+                TidalSettingsView().tabItem { Label("TIDAL", systemImage: "music.note.house") }.tag(SettingsTab.tidal)
+            }
             RemoteSettingsView().tabItem { Label("Remote", systemImage: "iphone") }.tag(SettingsTab.remote)
             UpdateSettings().tabItem { Label("Updates", systemImage: "arrow.down.circle") }.tag(SettingsTab.updates)
             AboutSettings().tabItem { Label("About", systemImage: "info.circle") }.tag(SettingsTab.about)
@@ -483,6 +486,12 @@ struct OnlineSettings: View {
                     Text("Covers are found by album name on the Cover Art Archive or in Apple’s music catalog, because Discord can only show images from the web. Your own files are never uploaded.")
                 }
                 .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("TIDAL integration", isOn: Binding(get: { model.settings.tidalEnabled }, set: { model.setTidalEnabled($0) }))
+            } footer: {
+                Text("Stream, sync and download from your TIDAL account. Off: Vespertine shows only your own music.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

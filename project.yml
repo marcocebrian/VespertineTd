@@ -64,6 +64,8 @@ targets:
         product: VespertineStreaming
       - package: VespertineKit
         product: VespertineOpenSubsonic
+      - package: VespertineKit
+        product: VespertineTidal
       - package: VespertineRemoteKit
         product: VespertineRemoteProtocol
       - package: VespertineRemoteKit

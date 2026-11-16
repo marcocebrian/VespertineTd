@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "VespertineAirPlay", targets: ["VespertineAirPlay"]),
         .library(name: "VespertineStreaming", targets: ["VespertineStreaming"]),
         .library(name: "VespertineOpenSubsonic", targets: ["VespertineOpenSubsonic"]),
+        .library(name: "VespertineTidal", targets: ["VespertineTidal"]),
     ],
     dependencies: [
         .package(url: "https://github.com/sbooth/SFBAudioEngine", exact: "0.14.0"),
@@ -99,6 +100,9 @@ let package = Package(
         ),
         // The OpenSubsonic provider: the listener's own server (Navidrome, Gonic, Airsonic and the like).
         .target(name: "VespertineOpenSubsonic", dependencies: ["VespertineStreaming", "VespertineAudio", "VespertineLibrary"]),
+        // TIDAL: auth, request gate, catalog, stream resolution and the fragmented-MP4-to-FLAC layout. No UI, no engine state.
+        .target(name: "VespertineTidal", dependencies: ["VespertineAudio", "VespertineLibrary"],
+                linkerSettings: [.linkedFramework("Security")]),
         // The visualizer window's analysis (FFT, bands, beats) and Metal renderer. Reads a copy of the samples only.
         .target(
             name: "VespertineVisualizer",
@@ -136,6 +140,9 @@ let package = Package(
         // The fake server the provider is tested against is the UPnP target's small HTTP server, on 127.0.0.1.
         .testTarget(name: "VespertineOpenSubsonicTests", dependencies: ["VespertineOpenSubsonic", "VespertineStreaming", "VespertineLibrary",
                                                                         "VespertineAudio", "VespertineUPnP"]),
+        .testTarget(name: "VespertineTidalTests",
+                    dependencies: ["VespertineTidal", "VespertineAudio", "VespertineLibrary", .product(name: "SFBAudioEngine", package: "SFBAudioEngine")],
+                    resources: [.copy("Fixtures")]),
         .testTarget(name: "VespertineVisualizerTests", dependencies: ["VespertineVisualizer"]),
         .testTarget(name: "VespertineLibraryTests", dependencies: ["VespertineLibrary", "CVespertineTags", "VespertineTestSupport"]),
     ],

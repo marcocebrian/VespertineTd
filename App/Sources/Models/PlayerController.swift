@@ -9,6 +9,7 @@ import VespertineAudio
 import VespertineLibrary
 import VespertineStreaming
 import VespertineUPnP
+import VespertineTidal
 import Observation
 
 struct QueueEntry: Identifiable, Hashable {
@@ -25,6 +26,22 @@ struct QueueEntry: Identifiable, Hashable {
     /// The same entry (same place in the queue, same flags) playing `track` through `item`.
     func replacing(_ track: Track, item: PlayableItem) -> QueueEntry {
         QueueEntry(item: item, track: track, versions: versions, queuedByUser: queuedByUser, received: received)
+    }
+}
+
+/// Tells the library a streamed TIDAL song's real format the first time the engine reports it (once per song per run; never for
+/// one already probed, or for a download, whose file is the truth already).
+@MainActor
+final class ProbedFormatRecorder {
+    private let record: (Int64, SourceFormat) -> Void
+    private var done: Set<Int64> = []
+
+    init(record: @escaping (Int64, SourceFormat) -> Void) { self.record = record }
+
+    func observe(url: URL, trackID: Int64, source: SourceFormat?, alreadyProbed: Bool) {
+        guard url.scheme == TidalPlayback.scheme, let source, !alreadyProbed, !done.contains(trackID) else { return }
+        done.insert(trackID)
+        record(trackID, source)
     }
 }
 
@@ -111,6 +128,15 @@ final class PlayerController {
     /// Set while the user drags the scrubber.
     var scrubbing: Double?
 
+    /// The real format of TIDAL catalog songs (no library row to record it in) played this run, by TIDAL id.
+    private(set) var catalogFormats: [Int: SourceFormat] = [:]
+
+    /// Stores a streamed TIDAL song's real format once the engine has opened it (`recordProbedFormat`).
+    @ObservationIgnored private lazy var probedFormats = ProbedFormatRecorder { [library] id, format in
+        try? library.database.recordProbedFormat(trackId: id, codec: format.codec, sampleRate: format.sampleRate,
+                                                 bitDepth: format.bitDepth, channels: format.channels)
+    }
+
     private var scrobbledEntry: UUID?
     /// The song last added to the play history, so one listen is added once.
     @ObservationIgnored private var historyEntry: UUID?
@@ -183,17 +209,23 @@ final class PlayerController {
     /// e.g. the chosen output is reconnecting). Set by the app model.
     var wantsMultichannel: () -> Bool? = { nil }
 
+    /// Whether a song can play now (the app's playability rule: a TIDAL song while TIDAL is out of reach can't). Songs that can't are
+    /// left out of what is queued, so a click on an album doesn't queue what would only fail.
+    var isPlayable: (Track) -> Bool = { _ in true }
+
     /// Queue entries for `tracks`, each playing the version of its song that suits the output.
     /// A song whose versions all arrive together (a whole SACD album) is queued once. With `allowing`, only
     /// versions it accepts are considered (a filtered page asked for multichannel: stereo versions stay out).
     /// `exactly`: tracks (by location) asked for as they are, a copy picked by hand, even on an album whose copies are bundled.
     private func entries(_ tracks: [Track], allowing: ((Track) -> Bool)? = nil, transitions: TransitionOverride? = nil,
                          exactly: Set<String> = []) -> [QueueEntry] {
+        let tracks = tracks.filter(isPlayable)
         // Only an album whose copies are bundled lets the output pick; any other copy plays as itself.
         let versions = library.playbackVersions(of: tracks).enumerated().map { i, versions in
             if exactly.contains(tracks[i].location) { return [tracks[i]] }
-            guard let allowing, versions.count > 1 else { return versions }
-            return versions.filter { $0.location == tracks[i].location || allowing($0) }
+            let playable = versions.filter { $0.location == tracks[i].location || isPlayable($0) }
+            guard let allowing, playable.count > 1 else { return playable }
+            return playable.filter { $0.location == tracks[i].location || allowing($0) }
         }
         let wanted = wantsMultichannel()
         var queued = Set<String>()
@@ -291,6 +323,26 @@ final class PlayerController {
     }
 
     func removeFromQueue(_ id: UUID) { removeFromQueue([id]) }
+
+    /// TIDAL was switched off: its songs leave the queue, those already played and those to come, and a TIDAL song that is playing
+    /// stops (playback does not move on by itself). Other songs, and a local song that is playing, are not touched.
+    func dropTidalTracks() {
+        func isTidal(_ entry: QueueEntry) -> Bool { entry.track.isTidalTrack }
+        func withoutTidalVersions(_ entry: QueueEntry) -> QueueEntry {
+            guard entry.versions.contains(where: \.isTidalTrack) else { return entry }
+            var copy = entry
+            copy.versions = entry.versions.filter { !$0.isTidalTrack }
+            if copy.versions.count < 2 { copy.versions = [] }
+            return copy
+        }
+        guard queue.contains(where: { isTidal($0) || $0.versions.contains(where: \.isTidalTrack) }) else { return }
+        let keptCurrent = current.flatMap { isTidal($0) ? nil : $0.id }
+        if current != nil, keptCurrent == nil { stop() }
+        queue = queue.filter { !isTidal($0) }.map(withoutTidalVersions)
+        originalOrder = originalOrder.filter { !isTidal($0) }.map(withoutTidalVersions)
+        currentIndex = keptCurrent.flatMap { id in queue.firstIndex { $0.id == id } }
+        syncMirror()
+    }
 
     /// Removes songs from the queue by entry, never the one playing. Entries no longer queued are ignored, so a
     /// request made from a list drawn a moment ago (the song ended meanwhile) can't remove the wrong song.
@@ -606,10 +658,25 @@ final class PlayerController {
             return PlayableItem(id: id, url: stream.url, trackID: track.id, replayGainDB: replayGain(for: track),
                                 cacheKey: stream.cacheKey, context: context)
         }
-        return PlayableItem(id: id, url: track.fileURL, trackID: track.id, regionStartFrame: track.cueStartFrame,
+        // A TIDAL song plays its download when the file is there, else its stream through the playback cache.
+        let tidal = track.isTidalTrack ? Self.tidalAddress(of: track, record: track.id.flatMap { library.tidalRecords[$0] },
+                                                          fileExists: { FileManager.default.fileExists(atPath: $0) }) : nil
+        return PlayableItem(id: id, url: tidal?.url ?? track.fileURL, trackID: track.id, regionStartFrame: track.cueStartFrame,
                             regionFrameLength: track.cueFrameLength, replayGainDB: replayGain(for: track),
-                            cacheKey: shares.isNetwork(track) && !track.isDVDFolderTrack ? NetworkCache.key(for: track) : nil,
+                            cacheKey: tidal.map(\.cacheKey) ?? (shares.isNetwork(track) && !track.isDVDFolderTrack ? NetworkCache.key(for: track) : nil),
                             sacdArea: track.sacdArea, dvd: track.dvdStream, context: context, audioStream: track.audioStream)
+    }
+
+    /// Where a TIDAL song plays from: its downloaded file when it is there (no cache key: a local file), else
+    /// `tidal://track/<id>` staged through the playback cache under `tidal:<id>`. Nil for a song that isn't TIDAL's.
+    nonisolated static func tidalAddress(of track: Track, record: TidalTrackRecord?,
+                                         fileExists: (String) -> Bool) -> (url: URL, cacheKey: String?)? {
+        guard track.isTidalTrack else { return nil }
+        if let path = record?.downloadPath ?? (track.filePath.isEmpty ? nil : track.filePath), fileExists(path) {
+            return (URL(fileURLWithPath: path, isDirectory: false), nil)
+        }
+        guard let tidalId = record?.tidalId ?? URL(string: track.location).flatMap(TidalPlayback.trackId(from:)) else { return nil }
+        return (TidalPlayback.url(trackId: tidalId), TidalPlayback.cacheKey(trackId: tidalId))
     }
 
     /// How `entry` joins the song before it in the queue, while transitions are on: what the engine planned for the
@@ -1251,7 +1318,17 @@ final class PlayerController {
         // Until the requested song plays, the engine's signal path is the previous song's.
         if requested == nil {
             let path = streamVerdict(snap.signalPath)
-            if signalPath != path { signalPath = path }
+            if signalPath != path {
+                signalPath = path
+                if let item = snap.item, let id = item.trackID {
+                    probedFormats.observe(url: item.url, trackID: id, source: snap.signalPath?.source,
+                                          alreadyProbed: library.tidalRecords[id]?.formatIsProbed ?? true)
+                } else if let item = snap.item, let source = snap.signalPath?.source, let tidalId = TidalPlayback.trackId(from: item.url),
+                          catalogFormats[tidalId] != source {
+                    // A catalog song (no library row): its lists show what was read instead of what TIDAL listed.
+                    catalogFormats[tidalId] = source
+                }
+            }
             confirmStreamedFormat()
             reportServerAnswering(snap)
             if systemRendering != snap.systemRendering { systemRendering = snap.systemRendering }
