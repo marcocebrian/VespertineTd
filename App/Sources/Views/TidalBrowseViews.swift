@@ -201,13 +201,15 @@ struct TidalCoverCard: View {
     let title: String
     let subtitle: String?
     let cover: String?
+    /// A cover TIDAL gives as a full URL (mixes), used instead of `cover`.
+    var coverURL: URL? = nil
     var round = false
     var format: String? = nil
     let open: () -> Void
 
     var body: some View {
         VStack(alignment: round ? .center : .leading, spacing: 0) {
-            ArtworkView(key: cover.map { "tidal:\($0)" }, size: 320, cornerRadius: round ? 68 : 6)
+            ArtworkView(key: ArtworkCache.tidalImageKey(coverURL) ?? cover.map { "tidal:\($0)" }, size: 320, cornerRadius: round ? 68 : 6)
                 .shadow(color: .black.opacity(0.45), radius: 13, y: 10)
             Text(verbatim: title)
                 .font(Typeface.serif(14)).foregroundStyle(Palette.text).lineLimit(1)
@@ -381,7 +383,9 @@ struct TidalMixesView: View {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 190), spacing: 24, alignment: .top)], spacing: 28) {
                             ForEach(mixes) { mix in
-                                TidalCoverCard(title: mix.title, subtitle: mix.subTitle, cover: nil) { opened = .mix(mix) }
+                                TidalCoverCard(title: mix.title, subtitle: mix.subTitle, cover: nil, coverURL: mix.imageURL(minimumWidth: 320)) {
+                                    opened = .mix(mix)
+                                }
                             }
                         }
                         .padding(.horizontal, 24).padding(.bottom, 24)

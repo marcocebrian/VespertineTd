@@ -221,5 +221,35 @@ struct TidalBrowseTests {
         let mixes = try await catalog.mixes(userId: 42)
         #expect(mixes.map(\.title) == ["My Mix 1"] && mixes.first?.subTitle == "Artist and more")
         #expect(try await catalog.mixTracks("0abc").map(\.id) == [9])
+        #expect(mixes.first?.images.isEmpty == true && mixes.first?.imageURL(minimumWidth: 320) == nil)
+    }
+
+    private func decodeMix(_ json: String) throws -> TidalMix {
+        try JSONDecoder().decode(TidalMix.self, from: Data(json.utf8))
+    }
+
+    @Test("A mix's cover: the smallest image at least as wide as asked, else the largest")
+    func mixCover() throws {
+        let mix = try decodeMix(#"""
+            {"id":"0abc","title":"My Mix 1","images":{
+              "LARGE":{"width":1500,"height":1500,"url":"https://images.tidal.com/l.jpg"},
+              "SMALL":{"width":320,"height":320,"url":"https://images.tidal.com/s.jpg"},
+              "MEDIUM":{"width":640,"height":640,"url":"https://images.tidal.com/m.jpg"}}}
+            """#)
+        #expect(mix.images.map(\.width) == [320, 640, 1500])
+        #expect(mix.imageURL(minimumWidth: 160)?.lastPathComponent == "s.jpg")
+        #expect(mix.imageURL(minimumWidth: 400)?.lastPathComponent == "m.jpg")
+        #expect(mix.imageURL(minimumWidth: 3000)?.lastPathComponent == "l.jpg")
+    }
+
+    @Test("A mix's cover also decodes from mixImages, without widths, and a broken one is left out")
+    func mixImagesArray() throws {
+        let mix = try decodeMix(#"""
+            {"id":"0abc","title":"My Mix 1","mixImages":[{"url":"https://images.tidal.com/a.jpg"},{"url":""},{"url":"https://images.tidal.com/b.jpg"}]}
+            """#)
+        #expect(mix.images.map(\.url.lastPathComponent) == ["a.jpg", "b.jpg"])
+        #expect(mix.imageURL(minimumWidth: 320)?.lastPathComponent == "b.jpg")
+        let broken = try decodeMix(#"{"id":"1","title":"X","images":{"SMALL":{"width":"wide"}}}"#)
+        #expect(broken.images.isEmpty)
     }
 }

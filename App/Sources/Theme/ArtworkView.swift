@@ -43,6 +43,7 @@ final class ArtworkCache {
         if let hit = cached(key, size: size) { return hit }
         if key.hasPrefix("memory-") { return nil }
         if key.hasPrefix("tidal:") { return await tidalCover(String(key.dropFirst("tidal:".count)), key: key, size: size) }
+        if key.hasPrefix(Self.tidalImagePrefix) { return await tidalImage(String(key.dropFirst(Self.tidalImagePrefix.count)), key: key, size: size) }
         guard let store else { return nil }
         let url = store.url(for: key, minimumSize: size)
         let image = await Task.detached(priority: .userInitiated) { NSImage(contentsOf: url) }.value
@@ -55,6 +56,21 @@ final class ArtworkCache {
         guard fetchesTidalCovers, !uuid.isEmpty else { return nil }
         let served = [160, 320, 640, 1280].first { $0 >= size } ?? 1280
         guard let (data, response) = try? await TidalCDN.session.data(from: TidalCatalog.coverURL(uuid, size: served)),
+              (response as? HTTPURLResponse)?.statusCode == 200, let image = NSImage(data: data) else { return nil }
+        cache.setObject(image, forKey: "\(key)_\(size)" as NSString)
+        return image
+    }
+
+    /// Keys of TIDAL pictures given as a full URL (mix covers): `tidal-image:<https URL>`.
+    static let tidalImagePrefix = "tidal-image:"
+
+    static func tidalImageKey(_ url: URL?) -> String? { url.map { tidalImagePrefix + $0.absoluteString } }
+
+    /// A TIDAL picture by URL, fetched only over HTTPS from a TIDAL host; kept in memory only.
+    private func tidalImage(_ string: String, key: String, size: Int) async -> NSImage? {
+        guard fetchesTidalCovers, let url = URL(string: string), url.scheme == "https", let host = url.host(),
+              ["tidal.com", "tidalhifi.com"].contains(where: { host == $0 || host.hasSuffix(".\($0)") }) else { return nil }
+        guard let (data, response) = try? await TidalCDN.session.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200, let image = NSImage(data: data) else { return nil }
         cache.setObject(image, forKey: "\(key)_\(size)" as NSString)
         return image

@@ -230,13 +230,72 @@ public struct TidalCredit: Codable, Sendable, Hashable {
     public var contributors: [TidalContributor]
 }
 
-/// A TIDAL mix (My Mix 1, Daily Discovery…): an id string and its titles.
+/// A picture TIDAL gives as a full URL (a mix's cover), with its width when TIDAL says it.
+public struct TidalImage: Codable, Sendable, Hashable {
+    public var url: URL
+    public var width: Int?
+
+    public init(url: URL, width: Int? = nil) { self.url = url; self.width = width }
+
+    /// Nil instead of a throw for an image without a usable URL, so one bad image only loses itself.
+    fileprivate static func lenient(_ c: KeyedDecodingContainer<MixKeys>, _ key: MixKeys) -> TidalImage? {
+        guard let image = try? c.decode(TidalImage.self, forKey: key), !image.url.absoluteString.isEmpty else { return nil }
+        return image
+    }
+}
+
+private enum MixKeys: String, CodingKey { case id, title, subTitle, images, mixImages, SMALL, MEDIUM, LARGE }
+
+/// A TIDAL mix (My Mix 1, Daily Discovery…): an id string, its titles and its cover (as TidalSwiftLib 0.4 reads it).
 public struct TidalMix: Codable, Sendable, Hashable, Identifiable {
     public var id: String
     public var title: String
     public var subTitle: String?
+    /// The cover in the sizes TIDAL sends, smallest first; empty for a mix without one.
+    public var images: [TidalImage]
 
-    public init(id: String, title: String, subTitle: String? = nil) {
-        self.id = id; self.title = title; self.subTitle = subTitle
+    public init(id: String, title: String, subTitle: String? = nil, images: [TidalImage] = []) {
+        self.id = id; self.title = title; self.subTitle = subTitle; self.images = images
     }
+
+    /// The smallest cover at least `minimumWidth` pixels wide, or the largest there is. Images without a width count in the
+    /// order TIDAL lists them (small to large).
+    public func imageURL(minimumWidth: Int) -> URL? {
+        (images.first { ($0.width ?? 0) >= minimumWidth } ?? images.last)?.url
+    }
+
+    // `images` is `{SMALL, MEDIUM, LARGE: {width, height, url}}` in v1 lists, `mixImages` an array of `{url, width?}` in pages.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: MixKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        subTitle = try c.decodeIfPresent(String.self, forKey: .subTitle)
+        if let sizes = try? c.nestedContainer(keyedBy: MixKeys.self, forKey: .images) {
+            images = [MixKeys.SMALL, .MEDIUM, .LARGE].compactMap { TidalImage.lenient(sizes, $0) }
+        } else if var list = try? c.nestedUnkeyedContainer(forKey: .mixImages) {
+            var found: [TidalImage] = []
+            while !list.isAtEnd {
+                if let image = try? list.decode(TidalImage.self) {
+                    if !image.url.absoluteString.isEmpty { found.append(image) }
+                } else {
+                    _ = try? list.decode(Skipped.self)
+                }
+            }
+            images = found
+        } else {
+            images = []
+        }
+        if images.allSatisfy({ $0.width != nil }) { images.sort { $0.width! < $1.width! } }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: MixKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(subTitle, forKey: .subTitle)
+        try c.encode(images, forKey: .mixImages)
+    }
+
+    /// Any JSON value, to step over an array element that isn't an image.
+    private struct Skipped: Decodable { init(from decoder: Decoder) throws {} }
 }
